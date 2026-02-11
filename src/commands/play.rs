@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use poise::serenity_prelude::{
-    ChannelId, Colour, CreateEmbed, CreateEmbedAuthor, CreateMessage, GuildId, Http,
+    AutocompleteChoice, ChannelId, Colour, CreateEmbed, CreateEmbedAuthor, CreateMessage, GuildId,
+    Http,
 };
 use songbird::events::{Event, EventContext, EventHandler, TrackEvent};
 use songbird::Call;
@@ -209,11 +210,37 @@ async fn enqueue_collection_tracks(
     );
 }
 
+async fn autocomplete_query(ctx: Context<'_>, partial: &str) -> Vec<AutocompleteChoice> {
+    let partial = partial.trim();
+
+    if partial.len() < 3 || partial.starts_with("http://") || partial.starts_with("https://") {
+        return Vec::new();
+    }
+
+    let results = ctx.data().music_service.search(partial, 5).await;
+
+    results
+        .into_iter()
+        .take(25)
+        .map(|track| {
+            let name = format!("{}", track);
+            let name = if name.len() > 100 {
+                format!("{}...", &name.chars().take(97).collect::<String>())
+            } else {
+                name
+            };
+            AutocompleteChoice::new(name, track.url)
+        })
+        .collect()
+}
+
 /// Play a song from YouTube or Spotify
 #[poise::command(slash_command, guild_only)]
 pub async fn play(
     ctx: Context<'_>,
-    #[description = "YouTube/Spotify URL or search query"] query: String,
+    #[description = "YouTube/Spotify URL or search query"]
+    #[autocomplete = "autocomplete_query"]
+    query: String,
 ) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or(MusicError::NotInGuild)?;
 
