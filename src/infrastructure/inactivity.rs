@@ -4,8 +4,9 @@ use std::time::Duration;
 use poise::serenity_prelude::{Cache, ChannelId, CreateMessage, GuildId, Http};
 use tokio::sync::Notify;
 
-use crate::services::queue_service::{GuildQueues, QueueService};
-use crate::InactivityHandles;
+use crate::services::cleanup::cleanup_guild;
+use crate::services::queue_service::GuildQueues;
+use crate::{EnqueueCancels, InactivityHandles};
 
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const CHECK_INTERVAL: Duration = Duration::from_secs(30);
@@ -23,6 +24,7 @@ pub fn spawn_inactivity_monitor(
     cache: Arc<Cache>,
     guild_queues: GuildQueues,
     inactivity_handles: InactivityHandles,
+    enqueue_cancels: EnqueueCancels,
 ) -> Arc<Notify> {
     let cancel = Arc::new(Notify::new());
     let cancel_clone = cancel.clone();
@@ -52,8 +54,14 @@ pub fn spawn_inactivity_monitor(
                     handler.queue().stop();
                 }
                 let _ = manager.leave(guild_id).await;
-                QueueService::clear(&guild_queues, guild_id).await;
-                inactivity_handles.write().await.remove(&guild_id);
+
+                cleanup_guild(
+                    guild_id,
+                    &guild_queues,
+                    &enqueue_cancels,
+                    &inactivity_handles,
+                )
+                .await;
 
                 let msg = CreateMessage::new()
                     .content("Disconnected due to 15 minutes of inactivity.");

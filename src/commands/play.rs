@@ -7,15 +7,16 @@ use poise::serenity_prelude::{
 };
 use songbird::events::{Event, EventContext, EventHandler, TrackEvent};
 use songbird::Call;
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::Mutex;
 
 use crate::domain::track::{Track, TrackSource};
 use crate::infrastructure::audio::AudioSource;
 use crate::infrastructure::inactivity::spawn_inactivity_monitor;
+use crate::services::cleanup::cleanup_guild;
 use crate::services::error::MusicError;
 use crate::services::music_service::{MusicService, SpotifyUrl};
 use crate::services::queue_service::{GuildQueues, QueueService};
-use crate::{Context, Error};
+use crate::{Context, EnqueueCancels, Error, InactivityHandles};
 
 pub const SPOTIFY_ICON: &str = "https://upload.wikimedia.org/wikipedia/commons/thumb/1/19/Spotify_logo_without_text.svg/168px-Spotify_logo_without_text.svg.png";
 pub const YOUTUBE_ICON: &str = "https://www.gstatic.com/images/branding/product/2x/youtube_64dp.png";
@@ -105,6 +106,28 @@ impl EventHandler for NowPlayingNotifier {
     }
 }
 
+struct DisconnectCleanup {
+    guild_id: GuildId,
+    guild_queues: GuildQueues,
+    enqueue_cancels: EnqueueCancels,
+    inactivity_handles: InactivityHandles,
+}
+
+#[async_trait]
+impl EventHandler for DisconnectCleanup {
+    async fn act(&self, _ctx: &EventContext<'_>) -> Option<Event> {
+        tracing::info!("Bot disconnected from guild {}, cleaning up", self.guild_id);
+        cleanup_guild(
+            self.guild_id,
+            &self.guild_queues,
+            &self.enqueue_cancels,
+            &self.inactivity_handles,
+        )
+        .await;
+        None
+    }
+}
+
 async fn enqueue_track(
     track: &Track,
     search_query: &str,
@@ -139,7 +162,7 @@ async fn enqueue_track(
     QueueService::add_track(guild_queues, guild_id, track.clone()).await;
 }
 
-async fn enqueue_remaining_tracks(
+async fn enqueue_collection_tracks(
     tracks: Vec<Track>,
     http_client: reqwest::Client,
     handler_lock: Arc<Mutex<Call>>,
@@ -148,9 +171,12 @@ async fn enqueue_remaining_tracks(
     requester: String,
     guild_queues: GuildQueues,
     guild_id: GuildId,
-    _enqueue_guard: OwnedMutexGuard<()>,
+    enqueue_mutex: Arc<Mutex<()>>,
     cancel_flag: Arc<AtomicBool>,
 ) {
+    // Acquire per-guild lock so collections are enqueued sequentially
+    let _guard = enqueue_mutex.lock_owned().await;
+
     for track in &tracks {
         if cancel_flag.load(Ordering::Relaxed) {
             tracing::info!("Background enqueue cancelled for guild {guild_id}");
@@ -218,6 +244,20 @@ pub async fn play(
         .await
         .map_err(|e| MusicError::JoinError(e.to_string()))?;
 
+    // Register disconnect cleanup handler
+    {
+        let mut handler = handler_lock.lock().await;
+        handler.add_global_event(
+            Event::Core(songbird::CoreEvent::DriverDisconnect),
+            DisconnectCleanup {
+                guild_id,
+                guild_queues: data.guild_queues.clone(),
+                enqueue_cancels: data.enqueue_cancels.clone(),
+                inactivity_handles: data.inactivity_handles.clone(),
+            },
+        );
+    }
+
     // Spawn inactivity monitor if not already running for this guild
     {
         let mut handles = data.inactivity_handles.write().await;
@@ -231,6 +271,7 @@ pub async fn play(
                 ctx.serenity_context().cache.clone(),
                 data.guild_queues.clone(),
                 data.inactivity_handles.clone(),
+                data.enqueue_cancels.clone(),
             )
         });
     }
@@ -252,28 +293,6 @@ pub async fn play(
         let url = format!("https://www.youtube.com/playlist?list={playlist_id}");
         let count = tracks.len();
 
-        // Acquire per-guild enqueue lock to serialize collection enqueues
-        let enqueue_mutex = {
-            let mut locks = data.enqueue_locks.write().await;
-            locks.entry(guild_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
-        };
-        let enqueue_guard = enqueue_mutex.lock_owned().await;
-
-        // Enqueue first track immediately
-        let first = &tracks[0];
-        enqueue_track(
-            first,
-            "",
-            http,
-            &handler_lock,
-            &serenity_http,
-            text_channel_id,
-            &requester,
-            &data.guild_queues,
-            guild_id,
-        )
-        .await;
-
         // Respond immediately
         ctx.send(
             poise::CreateReply::default()
@@ -281,25 +300,26 @@ pub async fn play(
         )
         .await?;
 
-        // Background enqueue remaining tracks (guard keeps lock held)
-        if tracks.len() > 1 {
-            let cancel_flag = Arc::new(AtomicBool::new(false));
-            data.enqueue_cancels.write().await.insert(guild_id, cancel_flag.clone());
+        // Background enqueue all tracks (lock acquired inside)
+        let enqueue_mutex = {
+            let mut locks = data.enqueue_locks.write().await;
+            locks.entry(guild_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+        };
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        data.enqueue_cancels.write().await.insert(guild_id, cancel_flag.clone());
 
-            let remaining = tracks[1..].to_vec();
-            tokio::spawn(enqueue_remaining_tracks(
-                remaining,
-                http.clone(),
-                handler_lock,
-                serenity_http,
-                text_channel_id,
-                requester,
-                data.guild_queues.clone(),
-                guild_id,
-                enqueue_guard,
-                cancel_flag,
-            ));
-        }
+        tokio::spawn(enqueue_collection_tracks(
+            tracks,
+            http.clone(),
+            handler_lock,
+            serenity_http,
+            text_channel_id,
+            requester,
+            data.guild_queues.clone(),
+            guild_id,
+            enqueue_mutex,
+            cancel_flag,
+        ));
     } else if MusicService::is_youtube_url(&query) {
         let track = if let Some(video_id) = MusicService::extract_youtube_video_id(&query) {
             data.music_service
@@ -380,29 +400,6 @@ pub async fn play(
                 let url = format!("https://open.spotify.com/playlist/{id}");
                 let count = tracks.len();
 
-                // Acquire per-guild enqueue lock to serialize collection enqueues
-                let enqueue_mutex = {
-                    let mut locks = data.enqueue_locks.write().await;
-                    locks.entry(guild_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
-                };
-                let enqueue_guard = enqueue_mutex.lock_owned().await;
-
-                // Enqueue first track immediately
-                let first = &tracks[0];
-                let search_query = MusicService::spotify_to_youtube_query(first);
-                enqueue_track(
-                    first,
-                    &search_query,
-                    http,
-                    &handler_lock,
-                    &serenity_http,
-                    text_channel_id,
-                    &requester,
-                    &data.guild_queues,
-                    guild_id,
-                )
-                .await;
-
                 // Respond immediately
                 ctx.send(
                     poise::CreateReply::default()
@@ -410,25 +407,26 @@ pub async fn play(
                 )
                 .await?;
 
-                // Background enqueue remaining tracks (guard keeps lock held)
-                if tracks.len() > 1 {
-                    let cancel_flag = Arc::new(AtomicBool::new(false));
-                    data.enqueue_cancels.write().await.insert(guild_id, cancel_flag.clone());
+                // Background enqueue all tracks (lock acquired inside)
+                let enqueue_mutex = {
+                    let mut locks = data.enqueue_locks.write().await;
+                    locks.entry(guild_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+                };
+                let cancel_flag = Arc::new(AtomicBool::new(false));
+                data.enqueue_cancels.write().await.insert(guild_id, cancel_flag.clone());
 
-                    let remaining = tracks[1..].to_vec();
-                    tokio::spawn(enqueue_remaining_tracks(
-                        remaining,
-                        http.clone(),
-                        handler_lock,
-                        serenity_http,
-                        text_channel_id,
-                        requester,
-                        data.guild_queues.clone(),
-                        guild_id,
-                        enqueue_guard,
-                        cancel_flag,
-                    ));
-                }
+                tokio::spawn(enqueue_collection_tracks(
+                    tracks,
+                    http.clone(),
+                    handler_lock,
+                    serenity_http,
+                    text_channel_id,
+                    requester,
+                    data.guild_queues.clone(),
+                    guild_id,
+                    enqueue_mutex,
+                    cancel_flag,
+                ));
             }
             SpotifyUrl::Album(id) => {
                 let (tracks, name) = tokio::join!(
@@ -443,29 +441,6 @@ pub async fn play(
                 let url = format!("https://open.spotify.com/album/{id}");
                 let count = tracks.len();
 
-                // Acquire per-guild enqueue lock to serialize collection enqueues
-                let enqueue_mutex = {
-                    let mut locks = data.enqueue_locks.write().await;
-                    locks.entry(guild_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
-                };
-                let enqueue_guard = enqueue_mutex.lock_owned().await;
-
-                // Enqueue first track immediately
-                let first = &tracks[0];
-                let search_query = MusicService::spotify_to_youtube_query(first);
-                enqueue_track(
-                    first,
-                    &search_query,
-                    http,
-                    &handler_lock,
-                    &serenity_http,
-                    text_channel_id,
-                    &requester,
-                    &data.guild_queues,
-                    guild_id,
-                )
-                .await;
-
                 // Respond immediately
                 ctx.send(
                     poise::CreateReply::default()
@@ -473,25 +448,26 @@ pub async fn play(
                 )
                 .await?;
 
-                // Background enqueue remaining tracks (guard keeps lock held)
-                if tracks.len() > 1 {
-                    let cancel_flag = Arc::new(AtomicBool::new(false));
-                    data.enqueue_cancels.write().await.insert(guild_id, cancel_flag.clone());
+                // Background enqueue all tracks (lock acquired inside)
+                let enqueue_mutex = {
+                    let mut locks = data.enqueue_locks.write().await;
+                    locks.entry(guild_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+                };
+                let cancel_flag = Arc::new(AtomicBool::new(false));
+                data.enqueue_cancels.write().await.insert(guild_id, cancel_flag.clone());
 
-                    let remaining = tracks[1..].to_vec();
-                    tokio::spawn(enqueue_remaining_tracks(
-                        remaining,
-                        http.clone(),
-                        handler_lock,
-                        serenity_http,
-                        text_channel_id,
-                        requester,
-                        data.guild_queues.clone(),
-                        guild_id,
-                        enqueue_guard,
-                        cancel_flag,
-                    ));
-                }
+                tokio::spawn(enqueue_collection_tracks(
+                    tracks,
+                    http.clone(),
+                    handler_lock,
+                    serenity_http,
+                    text_channel_id,
+                    requester,
+                    data.guild_queues.clone(),
+                    guild_id,
+                    enqueue_mutex,
+                    cancel_flag,
+                ));
             }
         }
     } else {

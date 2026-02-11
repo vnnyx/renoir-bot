@@ -1,18 +1,12 @@
-use std::sync::atomic::Ordering;
-
+use crate::services::cleanup::cleanup_guild;
 use crate::services::error::MusicError;
-use crate::services::queue_service::QueueService;
 use crate::{Context, Error};
 
 /// Stop playback, clear the queue, and leave the voice channel
 #[poise::command(slash_command, guild_only)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or(MusicError::NotInGuild)?;
-
-    // Cancel any background enqueue task for this guild
-    if let Some(cancel) = ctx.data().enqueue_cancels.write().await.remove(&guild_id) {
-        cancel.store(true, Ordering::Relaxed);
-    }
+    let data = ctx.data();
 
     let manager = songbird::get(ctx.serenity_context())
         .await
@@ -28,12 +22,13 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
         .await
         .map_err(|e| MusicError::JoinError(e.to_string()))?;
 
-    QueueService::clear(&ctx.data().guild_queues, guild_id).await;
-
-    // Cancel inactivity monitor
-    if let Some(cancel) = ctx.data().inactivity_handles.write().await.remove(&guild_id) {
-        cancel.notify_one();
-    }
+    cleanup_guild(
+        guild_id,
+        &data.guild_queues,
+        &data.enqueue_cancels,
+        &data.inactivity_handles,
+    )
+    .await;
 
     ctx.say("Stopped playback and left the voice channel.").await?;
     Ok(())
