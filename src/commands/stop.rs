@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use crate::services::error::MusicError;
 use crate::services::queue_service::QueueService;
 use crate::{Context, Error};
@@ -6,6 +8,11 @@ use crate::{Context, Error};
 #[poise::command(slash_command, guild_only)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or(MusicError::NotInGuild)?;
+
+    // Cancel any background enqueue task for this guild
+    if let Some(cancel) = ctx.data().enqueue_cancels.write().await.remove(&guild_id) {
+        cancel.store(true, Ordering::Relaxed);
+    }
 
     let manager = songbird::get(ctx.serenity_context())
         .await

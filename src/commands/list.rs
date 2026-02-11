@@ -37,8 +37,11 @@ pub async fn list(ctx: Context<'_>) -> Result<(), Error> {
 
     // Up next embed (if there are queued tracks)
     if tracks.len() > 1 {
+        const MAX_DISPLAY: usize = 10;
+        let queued = &tracks[1..];
         let mut desc = String::new();
-        for (i, track) in tracks.iter().skip(1).enumerate() {
+
+        for (i, track) in queued.iter().take(MAX_DISPLAY).enumerate() {
             let d = track.duration.as_deref().unwrap_or("--:--");
             let icon = match track.source {
                 TrackSource::Spotify => "[SP]",
@@ -53,7 +56,12 @@ pub async fn list(ctx: Context<'_>) -> Result<(), Error> {
             ));
         }
 
-        let footer_text = format!("{} tracks in queue", tracks.len() - 1);
+        let remaining = queued.len().saturating_sub(MAX_DISPLAY);
+        let footer_text = if remaining > 0 {
+            format!("{} tracks in queue (+{} more)", queued.len(), remaining)
+        } else {
+            format!("{} tracks in queue", queued.len())
+        };
 
         let queue_embed = CreateEmbed::new()
             .title("Up next")

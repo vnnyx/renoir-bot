@@ -14,16 +14,21 @@ use services::music_service::MusicService;
 use services::queue_service::{GuildQueues, QueueService};
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 pub type InactivityHandles = Arc<RwLock<HashMap<serenity::GuildId, Arc<Notify>>>>;
+pub type EnqueueLocks = Arc<RwLock<HashMap<serenity::GuildId, Arc<Mutex<()>>>>>;
+pub type EnqueueCancels = Arc<RwLock<HashMap<serenity::GuildId, Arc<AtomicBool>>>>;
 
 pub struct Data {
     pub music_service: MusicService,
     pub guild_queues: GuildQueues,
     pub http_client: reqwest::Client,
     pub inactivity_handles: InactivityHandles,
+    pub enqueue_locks: EnqueueLocks,
+    pub enqueue_cancels: EnqueueCancels,
 }
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -63,11 +68,15 @@ async fn main() {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 tracing::info!("Bot is ready!");
                 let inactivity_handles = Arc::new(RwLock::new(HashMap::new()));
+                let enqueue_locks = Arc::new(RwLock::new(HashMap::new()));
+                let enqueue_cancels = Arc::new(RwLock::new(HashMap::new()));
                 Ok(Data {
                     music_service,
                     guild_queues,
                     http_client,
                     inactivity_handles,
+                    enqueue_locks,
+                    enqueue_cancels,
                 })
             })
         })

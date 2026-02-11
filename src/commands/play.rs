@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -6,7 +7,7 @@ use poise::serenity_prelude::{
 };
 use songbird::events::{Event, EventContext, EventHandler, TrackEvent};
 use songbird::Call;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::domain::track::{Track, TrackSource};
 use crate::infrastructure::audio::AudioSource;
@@ -147,8 +148,15 @@ async fn enqueue_remaining_tracks(
     requester: String,
     guild_queues: GuildQueues,
     guild_id: GuildId,
+    _enqueue_guard: OwnedMutexGuard<()>,
+    cancel_flag: Arc<AtomicBool>,
 ) {
     for track in &tracks {
+        if cancel_flag.load(Ordering::Relaxed) {
+            tracing::info!("Background enqueue cancelled for guild {guild_id}");
+            return;
+        }
+
         let search_query = match track.source {
             TrackSource::Spotify => MusicService::spotify_to_youtube_query(track),
             TrackSource::YouTube => String::new(),
@@ -244,6 +252,13 @@ pub async fn play(
         let url = format!("https://www.youtube.com/playlist?list={playlist_id}");
         let count = tracks.len();
 
+        // Acquire per-guild enqueue lock to serialize collection enqueues
+        let enqueue_mutex = {
+            let mut locks = data.enqueue_locks.write().await;
+            locks.entry(guild_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+        };
+        let enqueue_guard = enqueue_mutex.lock_owned().await;
+
         // Enqueue first track immediately
         let first = &tracks[0];
         enqueue_track(
@@ -266,8 +281,11 @@ pub async fn play(
         )
         .await?;
 
-        // Background enqueue remaining tracks
+        // Background enqueue remaining tracks (guard keeps lock held)
         if tracks.len() > 1 {
+            let cancel_flag = Arc::new(AtomicBool::new(false));
+            data.enqueue_cancels.write().await.insert(guild_id, cancel_flag.clone());
+
             let remaining = tracks[1..].to_vec();
             tokio::spawn(enqueue_remaining_tracks(
                 remaining,
@@ -278,6 +296,8 @@ pub async fn play(
                 requester,
                 data.guild_queues.clone(),
                 guild_id,
+                enqueue_guard,
+                cancel_flag,
             ));
         }
     } else if MusicService::is_youtube_url(&query) {
@@ -360,6 +380,13 @@ pub async fn play(
                 let url = format!("https://open.spotify.com/playlist/{id}");
                 let count = tracks.len();
 
+                // Acquire per-guild enqueue lock to serialize collection enqueues
+                let enqueue_mutex = {
+                    let mut locks = data.enqueue_locks.write().await;
+                    locks.entry(guild_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+                };
+                let enqueue_guard = enqueue_mutex.lock_owned().await;
+
                 // Enqueue first track immediately
                 let first = &tracks[0];
                 let search_query = MusicService::spotify_to_youtube_query(first);
@@ -383,8 +410,11 @@ pub async fn play(
                 )
                 .await?;
 
-                // Background enqueue remaining tracks
+                // Background enqueue remaining tracks (guard keeps lock held)
                 if tracks.len() > 1 {
+                    let cancel_flag = Arc::new(AtomicBool::new(false));
+                    data.enqueue_cancels.write().await.insert(guild_id, cancel_flag.clone());
+
                     let remaining = tracks[1..].to_vec();
                     tokio::spawn(enqueue_remaining_tracks(
                         remaining,
@@ -395,6 +425,8 @@ pub async fn play(
                         requester,
                         data.guild_queues.clone(),
                         guild_id,
+                        enqueue_guard,
+                        cancel_flag,
                     ));
                 }
             }
@@ -411,6 +443,13 @@ pub async fn play(
                 let url = format!("https://open.spotify.com/album/{id}");
                 let count = tracks.len();
 
+                // Acquire per-guild enqueue lock to serialize collection enqueues
+                let enqueue_mutex = {
+                    let mut locks = data.enqueue_locks.write().await;
+                    locks.entry(guild_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+                };
+                let enqueue_guard = enqueue_mutex.lock_owned().await;
+
                 // Enqueue first track immediately
                 let first = &tracks[0];
                 let search_query = MusicService::spotify_to_youtube_query(first);
@@ -434,8 +473,11 @@ pub async fn play(
                 )
                 .await?;
 
-                // Background enqueue remaining tracks
+                // Background enqueue remaining tracks (guard keeps lock held)
                 if tracks.len() > 1 {
+                    let cancel_flag = Arc::new(AtomicBool::new(false));
+                    data.enqueue_cancels.write().await.insert(guild_id, cancel_flag.clone());
+
                     let remaining = tracks[1..].to_vec();
                     tokio::spawn(enqueue_remaining_tracks(
                         remaining,
@@ -446,6 +488,8 @@ pub async fn play(
                         requester,
                         data.guild_queues.clone(),
                         guild_id,
+                        enqueue_guard,
+                        cancel_flag,
                     ));
                 }
             }
