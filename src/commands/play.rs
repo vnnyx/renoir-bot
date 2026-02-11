@@ -244,36 +244,45 @@ pub async fn play(
         .await
         .map_err(|e| MusicError::JoinError(e.to_string()))?;
 
-    // Register disconnect cleanup handler
-    {
-        let mut handler = handler_lock.lock().await;
-        handler.add_global_event(
-            Event::Core(songbird::CoreEvent::DriverDisconnect),
-            DisconnectCleanup {
-                guild_id,
-                guild_queues: data.guild_queues.clone(),
-                enqueue_cancels: data.enqueue_cancels.clone(),
-                inactivity_handles: data.inactivity_handles.clone(),
-            },
-        );
-    }
-
-    // Spawn inactivity monitor if not already running for this guild
+    // On fresh join: register disconnect handler, clear stale queue, start inactivity monitor
     {
         let mut handles = data.inactivity_handles.write().await;
-        handles.entry(guild_id).or_insert_with(|| {
-            spawn_inactivity_monitor(
-                manager.clone(),
+        if !handles.contains_key(&guild_id) {
+            // Fresh join — clear any stale songbird queue from a previous session
+            {
+                let handler = handler_lock.lock().await;
+                handler.queue().stop();
+            }
+
+            // Register disconnect cleanup handler
+            {
+                let mut handler = handler_lock.lock().await;
+                handler.add_global_event(
+                    Event::Core(songbird::CoreEvent::DriverDisconnect),
+                    DisconnectCleanup {
+                        guild_id,
+                        guild_queues: data.guild_queues.clone(),
+                        enqueue_cancels: data.enqueue_cancels.clone(),
+                        inactivity_handles: data.inactivity_handles.clone(),
+                    },
+                );
+            }
+
+            handles.insert(
                 guild_id,
-                voice_channel_id,
-                text_channel_id,
-                serenity_http.clone(),
-                ctx.serenity_context().cache.clone(),
-                data.guild_queues.clone(),
-                data.inactivity_handles.clone(),
-                data.enqueue_cancels.clone(),
-            )
-        });
+                spawn_inactivity_monitor(
+                    manager.clone(),
+                    guild_id,
+                    voice_channel_id,
+                    text_channel_id,
+                    serenity_http.clone(),
+                    ctx.serenity_context().cache.clone(),
+                    data.guild_queues.clone(),
+                    data.inactivity_handles.clone(),
+                    data.enqueue_cancels.clone(),
+                ),
+            );
+        }
     }
 
     if MusicService::is_youtube_playlist_url(&query) {
