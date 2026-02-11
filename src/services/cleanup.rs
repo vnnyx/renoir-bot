@@ -15,9 +15,11 @@ pub async fn cleanup_guild(
     enqueue_cancels: &EnqueueCancels,
     inactivity_handles: &InactivityHandles,
 ) {
-    // Cancel background enqueue
-    if let Some(cancel) = enqueue_cancels.write().await.remove(&guild_id) {
-        cancel.store(true, Ordering::Relaxed);
+    // Cancel all background enqueue tasks
+    if let Some(flags) = enqueue_cancels.write().await.remove(&guild_id) {
+        for flag in flags {
+            flag.store(true, Ordering::Relaxed);
+        }
     }
 
     // Clear track queue

@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 
 pub type InactivityHandles = Arc<RwLock<HashMap<serenity::GuildId, Arc<Notify>>>>;
 pub type EnqueueLocks = Arc<RwLock<HashMap<serenity::GuildId, Arc<Mutex<()>>>>>;
-pub type EnqueueCancels = Arc<RwLock<HashMap<serenity::GuildId, Arc<AtomicBool>>>>;
+pub type EnqueueCancels = Arc<RwLock<HashMap<serenity::GuildId, Vec<Arc<AtomicBool>>>>>;
 
 pub struct Data {
     pub music_service: MusicService,

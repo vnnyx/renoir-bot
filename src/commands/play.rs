@@ -306,7 +306,7 @@ pub async fn play(
             locks.entry(guild_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
         };
         let cancel_flag = Arc::new(AtomicBool::new(false));
-        data.enqueue_cancels.write().await.insert(guild_id, cancel_flag.clone());
+        data.enqueue_cancels.write().await.entry(guild_id).or_default().push(cancel_flag.clone());
 
         tokio::spawn(enqueue_collection_tracks(
             tracks,
@@ -413,7 +413,7 @@ pub async fn play(
                     locks.entry(guild_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
                 };
                 let cancel_flag = Arc::new(AtomicBool::new(false));
-                data.enqueue_cancels.write().await.insert(guild_id, cancel_flag.clone());
+                data.enqueue_cancels.write().await.entry(guild_id).or_default().push(cancel_flag.clone());
 
                 tokio::spawn(enqueue_collection_tracks(
                     tracks,
@@ -454,7 +454,7 @@ pub async fn play(
                     locks.entry(guild_id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
                 };
                 let cancel_flag = Arc::new(AtomicBool::new(false));
-                data.enqueue_cancels.write().await.insert(guild_id, cancel_flag.clone());
+                data.enqueue_cancels.write().await.entry(guild_id).or_default().push(cancel_flag.clone());
 
                 tokio::spawn(enqueue_collection_tracks(
                     tracks,
