@@ -9,13 +9,18 @@ static YOUTUBE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:youtube\.com/watch|youtu\.be/|youtube\.com/shorts/)").unwrap()
 });
 
+static YOUTUBE_VIDEO_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/shorts/)([a-zA-Z0-9_-]{11})").unwrap()
+});
+
 static SPOTIFY_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"open\.spotify\.com/(track|playlist)/([a-zA-Z0-9]+)").unwrap()
+    Regex::new(r"open\.spotify\.com/(track|playlist|album)/([a-zA-Z0-9]+)").unwrap()
 });
 
 pub enum SpotifyUrl {
     Track(String),
     Playlist(String),
+    Album(String),
 }
 
 pub struct MusicService {
@@ -32,6 +37,11 @@ impl MusicService {
         YOUTUBE_URL_RE.is_match(query)
     }
 
+    pub fn extract_youtube_video_id(query: &str) -> Option<String> {
+        let caps = YOUTUBE_VIDEO_ID_RE.captures(query)?;
+        Some(caps.get(1)?.as_str().to_string())
+    }
+
     pub fn is_spotify_url(query: &str) -> bool {
         SPOTIFY_URL_RE.is_match(query)
     }
@@ -43,6 +53,7 @@ impl MusicService {
         match kind {
             "track" => Some(SpotifyUrl::Track(id)),
             "playlist" => Some(SpotifyUrl::Playlist(id)),
+            "album" => Some(SpotifyUrl::Album(id)),
             _ => None,
         }
     }

@@ -23,6 +23,11 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
 
     QueueService::clear(&ctx.data().guild_queues, guild_id).await;
 
+    // Cancel inactivity monitor
+    if let Some(cancel) = ctx.data().inactivity_handles.write().await.remove(&guild_id) {
+        cancel.notify_one();
+    }
+
     ctx.say("Stopped playback and left the voice channel.").await?;
     Ok(())
 }
