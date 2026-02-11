@@ -19,7 +19,7 @@ RUN touch src/main.rs && cargo build --release
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libopus0 libssl3 python3 pip \
+    ca-certificates libopus0 libssl3 python3 pip nodejs \
     && pip install --no-cache-dir --break-system-packages yt-dlp \
     && apt-get purge -y pip && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
