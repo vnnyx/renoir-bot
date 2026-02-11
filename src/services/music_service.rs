@@ -5,6 +5,14 @@ use crate::domain::track::Track;
 use crate::infrastructure::spotify::SpotifyClient;
 use crate::infrastructure::youtube::YouTubeClient;
 
+static YOUTUBE_PLAYLIST_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"youtube\.com/(?:playlist\?|watch\?.*list=)").unwrap()
+});
+
+static YOUTUBE_PLAYLIST_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[?&]list=([a-zA-Z0-9_-]+)").unwrap()
+});
+
 static YOUTUBE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:youtube\.com/watch|youtu\.be/|youtube\.com/shorts/)").unwrap()
 });
@@ -31,6 +39,15 @@ pub struct MusicService {
 impl MusicService {
     pub fn new(spotify: SpotifyClient, youtube: YouTubeClient) -> Self {
         Self { spotify, youtube }
+    }
+
+    pub fn is_youtube_playlist_url(query: &str) -> bool {
+        YOUTUBE_PLAYLIST_RE.is_match(query)
+    }
+
+    pub fn extract_youtube_playlist_id(query: &str) -> Option<String> {
+        let caps = YOUTUBE_PLAYLIST_ID_RE.captures(query)?;
+        Some(caps.get(1)?.as_str().to_string())
     }
 
     pub fn is_youtube_url(query: &str) -> bool {

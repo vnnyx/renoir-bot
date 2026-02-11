@@ -2,16 +2,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use poise::serenity_prelude::{
-    ChannelId, Colour, CreateEmbed, CreateEmbedAuthor, CreateMessage, Http,
+    ChannelId, Colour, CreateEmbed, CreateEmbedAuthor, CreateMessage, GuildId, Http,
 };
 use songbird::events::{Event, EventContext, EventHandler, TrackEvent};
+use songbird::Call;
+use tokio::sync::Mutex;
 
 use crate::domain::track::{Track, TrackSource};
 use crate::infrastructure::audio::AudioSource;
 use crate::infrastructure::inactivity::spawn_inactivity_monitor;
 use crate::services::error::MusicError;
 use crate::services::music_service::{MusicService, SpotifyUrl};
-use crate::services::queue_service::QueueService;
+use crate::services::queue_service::{GuildQueues, QueueService};
 use crate::{Context, Error};
 
 pub const SPOTIFY_ICON: &str = "https://upload.wikimedia.org/wikipedia/commons/thumb/1/19/Spotify_logo_without_text.svg/168px-Spotify_logo_without_text.svg.png";
@@ -67,7 +69,8 @@ pub fn now_playing_embed(track: &Track, requester: &str) -> CreateEmbed {
     embed
 }
 
-fn collection_embed(name: &str, url: &str, count: usize) -> CreateEmbed {
+fn collection_embed(name: &str, url: &str, count: usize, source: &TrackSource) -> CreateEmbed {
+    let (icon, color, source_name) = source_info(source);
     let linked_name = if url.is_empty() {
         format!("**{name}**")
     } else {
@@ -75,11 +78,11 @@ fn collection_embed(name: &str, url: &str, count: usize) -> CreateEmbed {
     };
 
     CreateEmbed::new()
-        .author(CreateEmbedAuthor::new("Spotify").icon_url(SPOTIFY_ICON))
+        .author(CreateEmbedAuthor::new(source_name).icon_url(icon))
         .description(format!(
             "Added {linked_name} with `{count}` tracks to the queue."
         ))
-        .colour(SPOTIFY_COLOR)
+        .colour(color)
 }
 
 struct NowPlayingNotifier {
@@ -99,6 +102,77 @@ impl EventHandler for NowPlayingNotifier {
         }
         None
     }
+}
+
+async fn enqueue_track(
+    track: &Track,
+    search_query: &str,
+    http_client: &reqwest::Client,
+    handler_lock: &Arc<Mutex<Call>>,
+    serenity_http: &Arc<Http>,
+    channel_id: ChannelId,
+    requester: &str,
+    guild_queues: &GuildQueues,
+    guild_id: GuildId,
+) {
+    let input = if search_query.is_empty() {
+        AudioSource::from_url(http_client.clone(), &track.url)
+    } else {
+        AudioSource::from_search(http_client.clone(), search_query)
+    };
+
+    {
+        let mut handler = handler_lock.lock().await;
+        let track_handle = handler.enqueue_input(input).await;
+        let _ = track_handle.add_event(
+            Event::Track(TrackEvent::Play),
+            NowPlayingNotifier {
+                http: serenity_http.clone(),
+                channel_id,
+                track: track.clone(),
+                requester: requester.to_string(),
+            },
+        );
+    }
+
+    QueueService::add_track(guild_queues, guild_id, track.clone()).await;
+}
+
+async fn enqueue_remaining_tracks(
+    tracks: Vec<Track>,
+    http_client: reqwest::Client,
+    handler_lock: Arc<Mutex<Call>>,
+    serenity_http: Arc<Http>,
+    channel_id: ChannelId,
+    requester: String,
+    guild_queues: GuildQueues,
+    guild_id: GuildId,
+) {
+    for track in &tracks {
+        let search_query = match track.source {
+            TrackSource::Spotify => MusicService::spotify_to_youtube_query(track),
+            TrackSource::YouTube => String::new(),
+        };
+
+        enqueue_track(
+            track,
+            &search_query,
+            &http_client,
+            &handler_lock,
+            &serenity_http,
+            channel_id,
+            &requester,
+            &guild_queues,
+            guild_id,
+        )
+        .await;
+    }
+
+    tracing::info!(
+        "Background enqueue complete: {} tracks for guild {}",
+        tracks.len(),
+        guild_id
+    );
 }
 
 /// Play a song from YouTube or Spotify
@@ -153,7 +227,60 @@ pub async fn play(
         });
     }
 
-    if MusicService::is_youtube_url(&query) {
+    if MusicService::is_youtube_playlist_url(&query) {
+        // YouTube playlist
+        let playlist_id = MusicService::extract_youtube_playlist_id(&query)
+            .ok_or(MusicError::NoResults)?;
+
+        let (tracks, name) = tokio::join!(
+            data.music_service.youtube.get_playlist_tracks(&playlist_id),
+            data.music_service.youtube.get_playlist_name(&playlist_id),
+        );
+        if tracks.is_empty() {
+            return Err(MusicError::NoResults.into());
+        }
+
+        let name = name.unwrap_or_else(|| "Playlist".to_string());
+        let url = format!("https://www.youtube.com/playlist?list={playlist_id}");
+        let count = tracks.len();
+
+        // Enqueue first track immediately
+        let first = &tracks[0];
+        enqueue_track(
+            first,
+            "",
+            http,
+            &handler_lock,
+            &serenity_http,
+            text_channel_id,
+            &requester,
+            &data.guild_queues,
+            guild_id,
+        )
+        .await;
+
+        // Respond immediately
+        ctx.send(
+            poise::CreateReply::default()
+                .embed(collection_embed(&name, &url, count, &TrackSource::YouTube)),
+        )
+        .await?;
+
+        // Background enqueue remaining tracks
+        if tracks.len() > 1 {
+            let remaining = tracks[1..].to_vec();
+            tokio::spawn(enqueue_remaining_tracks(
+                remaining,
+                http.clone(),
+                handler_lock,
+                serenity_http,
+                text_channel_id,
+                requester,
+                data.guild_queues.clone(),
+                guild_id,
+            ));
+        }
+    } else if MusicService::is_youtube_url(&query) {
         let track = if let Some(video_id) = MusicService::extract_youtube_video_id(&query) {
             data.music_service
                 .youtube
@@ -177,23 +304,20 @@ pub async fn play(
                 thumbnail_url: None,
             }
         };
-        let input = AudioSource::from_url(http.clone(), &query);
 
-        {
-            let mut handler = handler_lock.lock().await;
-            let track_handle = handler.enqueue_input(input).await;
-            let _ = track_handle.add_event(
-                Event::Track(TrackEvent::Play),
-                NowPlayingNotifier {
-                    http: serenity_http,
-                    channel_id: text_channel_id,
-                    track: track.clone(),
-                    requester,
-                },
-            );
-        }
+        enqueue_track(
+            &track,
+            "",
+            http,
+            &handler_lock,
+            &serenity_http,
+            text_channel_id,
+            &requester,
+            &data.guild_queues,
+            guild_id,
+        )
+        .await;
 
-        QueueService::add_track(&data.guild_queues, guild_id, track.clone()).await;
         ctx.send(poise::CreateReply::default().embed(enqueue_embed(&track)))
             .await?;
     } else if let Some(spotify_url) = MusicService::parse_spotify_url(&query) {
@@ -207,23 +331,19 @@ pub async fn play(
                     .ok_or(MusicError::NoResults)?;
 
                 let search_query = MusicService::spotify_to_youtube_query(&track);
-                let input = AudioSource::from_search(http.clone(), &search_query);
+                enqueue_track(
+                    &track,
+                    &search_query,
+                    http,
+                    &handler_lock,
+                    &serenity_http,
+                    text_channel_id,
+                    &requester,
+                    &data.guild_queues,
+                    guild_id,
+                )
+                .await;
 
-                {
-                    let mut handler = handler_lock.lock().await;
-                    let track_handle = handler.enqueue_input(input).await;
-                    let _ = track_handle.add_event(
-                        Event::Track(TrackEvent::Play),
-                        NowPlayingNotifier {
-                            http: serenity_http,
-                            channel_id: text_channel_id,
-                            track: track.clone(),
-                            requester,
-                        },
-                    );
-                }
-
-                QueueService::add_track(&data.guild_queues, guild_id, track.clone()).await;
                 ctx.send(poise::CreateReply::default().embed(enqueue_embed(&track)))
                     .await?;
             }
@@ -240,29 +360,43 @@ pub async fn play(
                 let url = format!("https://open.spotify.com/playlist/{id}");
                 let count = tracks.len();
 
-                for track in tracks {
-                    let search_query = MusicService::spotify_to_youtube_query(&track);
-                    let input = AudioSource::from_search(http.clone(), &search_query);
+                // Enqueue first track immediately
+                let first = &tracks[0];
+                let search_query = MusicService::spotify_to_youtube_query(first);
+                enqueue_track(
+                    first,
+                    &search_query,
+                    http,
+                    &handler_lock,
+                    &serenity_http,
+                    text_channel_id,
+                    &requester,
+                    &data.guild_queues,
+                    guild_id,
+                )
+                .await;
 
-                    {
-                        let mut handler = handler_lock.lock().await;
-                        let track_handle = handler.enqueue_input(input).await;
-                        let _ = track_handle.add_event(
-                            Event::Track(TrackEvent::Play),
-                            NowPlayingNotifier {
-                                http: serenity_http.clone(),
-                                channel_id: text_channel_id,
-                                track: track.clone(),
-                                requester: requester.clone(),
-                            },
-                        );
-                    }
+                // Respond immediately
+                ctx.send(
+                    poise::CreateReply::default()
+                        .embed(collection_embed(&name, &url, count, &TrackSource::Spotify)),
+                )
+                .await?;
 
-                    QueueService::add_track(&data.guild_queues, guild_id, track).await;
+                // Background enqueue remaining tracks
+                if tracks.len() > 1 {
+                    let remaining = tracks[1..].to_vec();
+                    tokio::spawn(enqueue_remaining_tracks(
+                        remaining,
+                        http.clone(),
+                        handler_lock,
+                        serenity_http,
+                        text_channel_id,
+                        requester,
+                        data.guild_queues.clone(),
+                        guild_id,
+                    ));
                 }
-
-                ctx.send(poise::CreateReply::default().embed(collection_embed(&name, &url, count)))
-                    .await?;
             }
             SpotifyUrl::Album(id) => {
                 let (tracks, name) = tokio::join!(
@@ -277,29 +411,43 @@ pub async fn play(
                 let url = format!("https://open.spotify.com/album/{id}");
                 let count = tracks.len();
 
-                for track in tracks {
-                    let search_query = MusicService::spotify_to_youtube_query(&track);
-                    let input = AudioSource::from_search(http.clone(), &search_query);
+                // Enqueue first track immediately
+                let first = &tracks[0];
+                let search_query = MusicService::spotify_to_youtube_query(first);
+                enqueue_track(
+                    first,
+                    &search_query,
+                    http,
+                    &handler_lock,
+                    &serenity_http,
+                    text_channel_id,
+                    &requester,
+                    &data.guild_queues,
+                    guild_id,
+                )
+                .await;
 
-                    {
-                        let mut handler = handler_lock.lock().await;
-                        let track_handle = handler.enqueue_input(input).await;
-                        let _ = track_handle.add_event(
-                            Event::Track(TrackEvent::Play),
-                            NowPlayingNotifier {
-                                http: serenity_http.clone(),
-                                channel_id: text_channel_id,
-                                track: track.clone(),
-                                requester: requester.clone(),
-                            },
-                        );
-                    }
+                // Respond immediately
+                ctx.send(
+                    poise::CreateReply::default()
+                        .embed(collection_embed(&name, &url, count, &TrackSource::Spotify)),
+                )
+                .await?;
 
-                    QueueService::add_track(&data.guild_queues, guild_id, track).await;
+                // Background enqueue remaining tracks
+                if tracks.len() > 1 {
+                    let remaining = tracks[1..].to_vec();
+                    tokio::spawn(enqueue_remaining_tracks(
+                        remaining,
+                        http.clone(),
+                        handler_lock,
+                        serenity_http,
+                        text_channel_id,
+                        requester,
+                        data.guild_queues.clone(),
+                        guild_id,
+                    ));
                 }
-
-                ctx.send(poise::CreateReply::default().embed(collection_embed(&name, &url, count)))
-                    .await?;
             }
         }
     } else {
@@ -309,29 +457,24 @@ pub async fn play(
         }
 
         let track = results.into_iter().next().unwrap();
-        let input = match track.source {
-            TrackSource::YouTube => AudioSource::from_url(http.clone(), &track.url),
-            TrackSource::Spotify => {
-                let search_query = MusicService::spotify_to_youtube_query(&track);
-                AudioSource::from_search(http.clone(), &search_query)
-            }
+        let search_query = match track.source {
+            TrackSource::YouTube => String::new(),
+            TrackSource::Spotify => MusicService::spotify_to_youtube_query(&track),
         };
 
-        {
-            let mut handler = handler_lock.lock().await;
-            let track_handle = handler.enqueue_input(input).await;
-            let _ = track_handle.add_event(
-                Event::Track(TrackEvent::Play),
-                NowPlayingNotifier {
-                    http: serenity_http,
-                    channel_id: text_channel_id,
-                    track: track.clone(),
-                    requester,
-                },
-            );
-        }
+        enqueue_track(
+            &track,
+            &search_query,
+            http,
+            &handler_lock,
+            &serenity_http,
+            text_channel_id,
+            &requester,
+            &data.guild_queues,
+            guild_id,
+        )
+        .await;
 
-        QueueService::add_track(&data.guild_queues, guild_id, track.clone()).await;
         ctx.send(poise::CreateReply::default().embed(enqueue_embed(&track)))
             .await?;
     }

@@ -46,6 +46,48 @@ struct VideoResponse {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PlaylistItemsResponse {
+    items: Vec<PlaylistItem>,
+    next_page_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PlaylistItem {
+    snippet: PlaylistItemSnippet,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaylistItemSnippet {
+    title: String,
+    channel_title: String,
+    thumbnails: Option<Thumbnails>,
+    resource_id: ResourceId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceId {
+    video_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PlaylistResponse {
+    items: Vec<PlaylistDetail>,
+}
+
+#[derive(Deserialize)]
+struct PlaylistDetail {
+    snippet: PlaylistDetailSnippet,
+}
+
+#[derive(Deserialize)]
+struct PlaylistDetailSnippet {
+    title: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct VideoItem {
     snippet: Snippet,
     content_details: ContentDetails,
@@ -145,6 +187,93 @@ impl YouTubeClient {
                 })
             })
             .collect()
+    }
+
+    pub async fn get_playlist_tracks(&self, playlist_id: &str) -> Vec<Track> {
+        let mut tracks = Vec::new();
+        let mut page_token: Option<String> = None;
+
+        loop {
+            let mut params = vec![
+                ("part", "snippet".to_string()),
+                ("playlistId", playlist_id.to_string()),
+                ("maxResults", "50".to_string()),
+                ("key", self.api_key.clone()),
+            ];
+            if let Some(token) = &page_token {
+                params.push(("pageToken", token.clone()));
+            }
+
+            let resp = self
+                .http
+                .get("https://www.googleapis.com/youtube/v3/playlistItems")
+                .query(&params)
+                .send()
+                .await;
+
+            let resp = match resp {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("YouTube playlistItems API request failed: {e}");
+                    break;
+                }
+            };
+
+            let playlist_resp: PlaylistItemsResponse = match resp.json().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("YouTube playlistItems API parse failed: {e}");
+                    break;
+                }
+            };
+
+            for item in playlist_resp.items {
+                if let Some(video_id) = item.snippet.resource_id.video_id {
+                    let thumbnail_url = item
+                        .snippet
+                        .thumbnails
+                        .and_then(|t| t.high.or(t.default))
+                        .map(|t| t.url);
+
+                    tracks.push(Track {
+                        title: item.snippet.title,
+                        artist: item.snippet.channel_title,
+                        url: format!("https://www.youtube.com/watch?v={video_id}"),
+                        source: TrackSource::YouTube,
+                        duration: None,
+                        thumbnail_url,
+                    });
+                }
+            }
+
+            match playlist_resp.next_page_token {
+                Some(token) => page_token = Some(token),
+                None => break,
+            }
+        }
+
+        tracks
+    }
+
+    pub async fn get_playlist_name(&self, playlist_id: &str) -> Option<String> {
+        let resp = self
+            .http
+            .get("https://www.googleapis.com/youtube/v3/playlists")
+            .query(&[
+                ("part", "snippet"),
+                ("id", playlist_id),
+                ("key", &self.api_key),
+            ])
+            .send()
+            .await
+            .ok()?;
+
+        let playlist_resp: PlaylistResponse = resp.json().await.ok()?;
+        playlist_resp
+            .items
+            .into_iter()
+            .next()
+            .map(|item| item.snippet.title)
     }
 
     pub async fn get_video(&self, video_id: &str) -> Option<Track> {
