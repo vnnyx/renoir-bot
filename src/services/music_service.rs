@@ -76,15 +76,21 @@ impl MusicService {
     }
 
     pub async fn search(&self, query: &str, limit: u32) -> Vec<Track> {
-        let (yt_results, sp_results) = tokio::join!(
-            self.youtube.search_tracks(query, limit),
-            self.spotify.search_tracks(query, limit),
-        );
+        let yt_fut = self.youtube.search_tracks(query, limit);
+        let sp_fut = self.spotify.search_tracks(query, limit);
+        tokio::pin!(yt_fut);
+        tokio::pin!(sp_fut);
 
-        let mut results = Vec::with_capacity(yt_results.len() + sp_results.len());
-        results.extend(yt_results);
-        results.extend(sp_results);
-        results
+        tokio::select! {
+            yt = &mut yt_fut => {
+                if !yt.is_empty() { return yt; }
+                sp_fut.await
+            }
+            sp = &mut sp_fut => {
+                if !sp.is_empty() { return sp; }
+                yt_fut.await
+            }
+        }
     }
 
     pub fn spotify_to_youtube_query(track: &Track) -> String {

@@ -21,6 +21,9 @@ use tokio::sync::{Mutex, Notify, RwLock};
 pub type InactivityHandles = Arc<RwLock<HashMap<serenity::GuildId, Arc<Notify>>>>;
 pub type EnqueueLocks = Arc<RwLock<HashMap<serenity::GuildId, Arc<Mutex<()>>>>>;
 pub type EnqueueCancels = Arc<RwLock<HashMap<serenity::GuildId, Vec<Arc<AtomicBool>>>>>;
+pub type JoinLocks = Arc<RwLock<HashMap<serenity::GuildId, Arc<Mutex<()>>>>>;
+pub type NowPlayingMessages =
+    Arc<RwLock<HashMap<serenity::GuildId, (serenity::ChannelId, serenity::MessageId)>>>;
 
 pub struct Data {
     pub music_service: MusicService,
@@ -29,6 +32,8 @@ pub struct Data {
     pub inactivity_handles: InactivityHandles,
     pub enqueue_locks: EnqueueLocks,
     pub enqueue_cancels: EnqueueCancels,
+    pub join_locks: JoinLocks,
+    pub now_playing_messages: NowPlayingMessages,
 }
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -61,6 +66,21 @@ async fn main() {
                 commands::skip::skip(),
                 commands::list::list(),
             ],
+            event_handler: |ctx, event, _framework, data| {
+                Box::pin(async move {
+                    if let serenity::FullEvent::InteractionCreate { interaction } = event {
+                        if let Some(component) = interaction.as_message_component() {
+                            if component.data.custom_id.starts_with("np_") {
+                                commands::now_playing::handle_now_playing_interaction(
+                                    ctx, component, data,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+            },
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {
@@ -70,6 +90,8 @@ async fn main() {
                 let inactivity_handles = Arc::new(RwLock::new(HashMap::new()));
                 let enqueue_locks = Arc::new(RwLock::new(HashMap::new()));
                 let enqueue_cancels = Arc::new(RwLock::new(HashMap::new()));
+                let join_locks = Arc::new(RwLock::new(HashMap::new()));
+                let now_playing_messages = Arc::new(RwLock::new(HashMap::new()));
                 Ok(Data {
                     music_service,
                     guild_queues,
@@ -77,6 +99,8 @@ async fn main() {
                     inactivity_handles,
                     enqueue_locks,
                     enqueue_cancels,
+                    join_locks,
+                    now_playing_messages,
                 })
             })
         })

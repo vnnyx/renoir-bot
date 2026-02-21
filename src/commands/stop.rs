@@ -15,6 +15,8 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
         &data.guild_queues,
         &data.enqueue_cancels,
         &data.inactivity_handles,
+        &data.now_playing_messages,
+        &ctx.serenity_context().http,
     )
     .await;
 
