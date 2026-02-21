@@ -83,6 +83,22 @@ async fn main() {
                     Ok(())
                 })
             },
+            on_error: |error| {
+                Box::pin(async move {
+                    match error {
+                        poise::FrameworkError::Command { error, ctx, .. } => {
+                            let msg = error.to_string();
+                            tracing::warn!("Command error: {msg}");
+                            let _ = ctx.say(format!("❌ {msg}")).await;
+                        }
+                        other => {
+                            if let Err(e) = poise::builtins::on_error(other).await {
+                                tracing::error!("Error handling error: {e}");
+                            }
+                        }
+                    }
+                })
+            },
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {

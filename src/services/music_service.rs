@@ -42,7 +42,18 @@ impl MusicService {
     }
 
     pub fn is_youtube_playlist_url(query: &str) -> bool {
-        YOUTUBE_PLAYLIST_RE.is_match(query)
+        if !YOUTUBE_PLAYLIST_RE.is_match(query) {
+            return false;
+        }
+        // YouTube Radio/Mix playlists (RD prefix) are auto-generated and
+        // not accessible via the YouTube Data API. If the URL also has a
+        // video ID, treat it as a single video instead.
+        if let Some(id) = Self::extract_youtube_playlist_id(query) {
+            if id.starts_with("RD") && Self::extract_youtube_video_id(query).is_some() {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn extract_youtube_playlist_id(query: &str) -> Option<String> {
