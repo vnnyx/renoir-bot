@@ -11,6 +11,9 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
         .await
         .expect("Songbird not registered");
 
+    // Capture the currently playing track BEFORE songbird skip
+    let skipped = QueueService::skip(&ctx.data().guild_queues, guild_id).await;
+
     if let Some(handler_lock) = manager.get(guild_id) {
         let handler = handler_lock.lock().await;
         let queue = handler.queue();
@@ -21,8 +24,6 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     } else {
         return Err(MusicError::EmptyQueue.into());
     }
-
-    let skipped = QueueService::skip(&ctx.data().guild_queues, guild_id).await;
 
     match skipped {
         Some(track) => ctx.say(format!("Skipped: **{}**", track)).await?,

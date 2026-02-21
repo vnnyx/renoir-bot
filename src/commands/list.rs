@@ -12,21 +12,22 @@ const QUEUE_COLOR: Colour = Colour::new(0x5865F2);
 #[poise::command(slash_command, guild_only)]
 pub async fn list(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or(MusicError::NotInGuild)?;
+    let data = ctx.data();
 
-    let tracks = QueueService::list(&ctx.data().guild_queues, guild_id).await;
+    let current = QueueService::current(&data.guild_queues, guild_id).await;
+    let upcoming = QueueService::list(&data.guild_queues, guild_id).await;
 
-    if tracks.is_empty() {
+    let Some(current) = current else {
         return Err(MusicError::EmptyQueue.into());
-    }
+    };
 
-    let current = &tracks[0];
     let (_, color, _) = source_info(&current.source);
     let duration = current.duration.as_deref().unwrap_or("--:--");
 
     // Now playing embed
     let mut now_playing = CreateEmbed::new()
         .title("Now playing")
-        .description(format!("{} - `{}`", linked_title(current), duration))
+        .description(format!("{} - `{}`", linked_title(&current), duration))
         .colour(color);
 
     if let Some(url) = &current.thumbnail_url {
@@ -36,12 +37,11 @@ pub async fn list(ctx: Context<'_>) -> Result<(), Error> {
     let mut reply = poise::CreateReply::default().embed(now_playing);
 
     // Up next embed (if there are queued tracks)
-    if tracks.len() > 1 {
+    if !upcoming.is_empty() {
         const MAX_DISPLAY: usize = 10;
-        let queued = &tracks[1..];
         let mut desc = String::new();
 
-        for (i, track) in queued.iter().take(MAX_DISPLAY).enumerate() {
+        for (i, track) in upcoming.iter().take(MAX_DISPLAY).enumerate() {
             let d = track.duration.as_deref().unwrap_or("--:--");
             let icon = match track.source {
                 TrackSource::Spotify => "[SP]",
@@ -56,11 +56,11 @@ pub async fn list(ctx: Context<'_>) -> Result<(), Error> {
             ));
         }
 
-        let remaining = queued.len().saturating_sub(MAX_DISPLAY);
+        let remaining = upcoming.len().saturating_sub(MAX_DISPLAY);
         let footer_text = if remaining > 0 {
-            format!("{} tracks in queue (+{} more)", queued.len(), remaining)
+            format!("{} tracks in queue (+{} more)", upcoming.len(), remaining)
         } else {
-            format!("{} tracks in queue", queued.len())
+            format!("{} tracks in queue", upcoming.len())
         };
 
         let queue_embed = CreateEmbed::new()

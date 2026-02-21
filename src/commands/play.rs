@@ -17,7 +17,7 @@ use crate::services::cleanup::cleanup_guild;
 use crate::services::error::MusicError;
 use crate::services::music_service::{MusicService, SpotifyUrl};
 use crate::services::queue_service::{GuildQueues, QueueService};
-use crate::{Context, EnqueueCancels, Error, InactivityHandles, JoinLocks, NowPlayingMessages};
+use crate::{Context, EnqueueCancels, Error, InactivityHandles, JoinLocks, NowPlayingMessages, RepeatStates};
 
 pub const SPOTIFY_ICON: &str = "https://upload.wikimedia.org/wikipedia/commons/thumb/1/19/Spotify_logo_without_text.svg/168px-Spotify_logo_without_text.svg.png";
 pub const YOUTUBE_ICON: &str = "https://www.gstatic.com/images/branding/product/2x/youtube_64dp.png";
@@ -92,14 +92,27 @@ struct NowPlayingNotifier {
     http: Arc<Http>,
     channel_id: ChannelId,
     guild_id: GuildId,
-    track: Track,
     requester: String,
     now_playing_messages: NowPlayingMessages,
+    guild_queues: GuildQueues,
+    repeat_states: RepeatStates,
 }
 
 #[async_trait]
 impl EventHandler for NowPlayingNotifier {
     async fn act(&self, _ctx: &EventContext<'_>) -> Option<Event> {
+        // Advance the domain queue: pop next track into `current`
+        let track = QueueService::advance(&self.guild_queues, self.guild_id).await;
+        let Some(track) = track else {
+            return None;
+        };
+
+        // If repeat is enabled, enable looping on the new track via songbird
+        let repeating = {
+            let states = self.repeat_states.read().await;
+            states.get(&self.guild_id).copied().unwrap_or(false)
+        };
+
         // Delete the previous "Now Playing" message
         if let Some((ch, msg_id)) = self
             .now_playing_messages
@@ -110,9 +123,9 @@ impl EventHandler for NowPlayingNotifier {
             let _ = ch.delete_message(&self.http, msg_id).await;
         }
 
-        let embed = now_playing_embed(&self.track, &self.requester);
+        let embed = now_playing_embed(&track, &self.requester);
         let components =
-            super::now_playing::build_now_playing_components(self.guild_id, false);
+            super::now_playing::build_now_playing_components(self.guild_id, false, repeating);
         let message = CreateMessage::new().embed(embed).components(components);
         match self.channel_id.send_message(&self.http, message).await {
             Ok(msg) => {
@@ -136,6 +149,7 @@ struct DisconnectCleanup {
     enqueue_cancels: EnqueueCancels,
     inactivity_handles: InactivityHandles,
     now_playing_messages: NowPlayingMessages,
+    repeat_states: RepeatStates,
 }
 
 #[async_trait]
@@ -149,6 +163,7 @@ impl EventHandler for DisconnectCleanup {
             &self.inactivity_handles,
             &self.now_playing_messages,
             &self.http,
+            &self.repeat_states,
         )
         .await;
         None
@@ -166,6 +181,7 @@ async fn enqueue_track(
     guild_queues: &GuildQueues,
     guild_id: GuildId,
     now_playing_messages: &NowPlayingMessages,
+    repeat_states: &RepeatStates,
 ) {
     let input = if search_query.is_empty() {
         AudioSource::from_url(http_client.clone(), &track.url)
@@ -182,9 +198,10 @@ async fn enqueue_track(
                 http: serenity_http.clone(),
                 channel_id,
                 guild_id,
-                track: track.clone(),
                 requester: requester.to_string(),
                 now_playing_messages: now_playing_messages.clone(),
+                guild_queues: guild_queues.clone(),
+                repeat_states: repeat_states.clone(),
             },
         );
     }
@@ -204,6 +221,7 @@ async fn enqueue_collection_tracks(
     enqueue_mutex: Arc<Mutex<()>>,
     cancel_flag: Arc<AtomicBool>,
     now_playing_messages: NowPlayingMessages,
+    repeat_states: RepeatStates,
 ) {
     // Acquire per-guild lock so collections are enqueued sequentially
     let _guard = enqueue_mutex.lock_owned().await;
@@ -230,6 +248,7 @@ async fn enqueue_collection_tracks(
             &guild_queues,
             guild_id,
             &now_playing_messages,
+            &repeat_states,
         )
         .await;
     }
@@ -419,6 +438,7 @@ pub async fn play(
             &track, "", http, &handler_lock, &serenity_http,
             text_channel_id, &requester, &data.guild_queues, guild_id,
             &data.now_playing_messages,
+            &data.repeat_states,
         )
         .await;
 
@@ -443,7 +463,7 @@ pub async fn play(
                 enqueue_track(
                     &track, &search_query, http, &handler_lock, &serenity_http,
                     text_channel_id, &requester, &data.guild_queues, guild_id,
-                    &data.now_playing_messages,
+                    &data.now_playing_messages, &data.repeat_states,
                 )
                 .await;
 
@@ -550,6 +570,7 @@ pub async fn play(
             &track, &search_query, http, &handler_lock, &serenity_http,
             text_channel_id, &requester, &data.guild_queues, guild_id,
             &data.now_playing_messages,
+            &data.repeat_states,
         )
         .await;
 
@@ -587,6 +608,7 @@ async fn setup_fresh_join(
                     enqueue_cancels: data.enqueue_cancels.clone(),
                     inactivity_handles: data.inactivity_handles.clone(),
                     now_playing_messages: data.now_playing_messages.clone(),
+                    repeat_states: data.repeat_states.clone(),
                 },
             );
         }
@@ -603,6 +625,7 @@ async fn setup_fresh_join(
                 data.inactivity_handles.clone(),
                 data.enqueue_cancels.clone(),
                 data.now_playing_messages.clone(),
+                data.repeat_states.clone(),
             ),
         );
     }
@@ -637,5 +660,6 @@ async fn spawn_background_enqueue(
         enqueue_mutex,
         cancel_flag,
         data.now_playing_messages.clone(),
+        data.repeat_states.clone(),
     ));
 }

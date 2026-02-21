@@ -11,11 +11,15 @@ use crate::services::cleanup::cleanup_guild;
 use crate::services::queue_service::QueueService;
 use crate::Data;
 
-pub fn build_now_playing_components(guild_id: GuildId, paused: bool) -> Vec<CreateActionRow> {
+pub fn build_now_playing_components(
+    guild_id: GuildId,
+    paused: bool,
+    repeating: bool,
+) -> Vec<CreateActionRow> {
     let pause_label = if paused { "▶ Resume" } else { "⏸ Pause" };
     let pause_id = format!("np_pause_{guild_id}");
 
-    let row = CreateActionRow::Buttons(vec![
+    let controls = CreateActionRow::Buttons(vec![
         CreateButton::new(format!("np_seekback_{guild_id}"))
             .label("⏪ -15s")
             .style(ButtonStyle::Secondary),
@@ -33,7 +37,24 @@ pub fn build_now_playing_components(guild_id: GuildId, paused: bool) -> Vec<Crea
             .style(ButtonStyle::Secondary),
     ]);
 
-    vec![row]
+    let repeat_style = if repeating {
+        ButtonStyle::Success
+    } else {
+        ButtonStyle::Secondary
+    };
+    let repeat_label = if repeating {
+        "🔁 Repeat (On)"
+    } else {
+        "🔁 Repeat"
+    };
+
+    let extras = CreateActionRow::Buttons(vec![
+        CreateButton::new(format!("np_repeat_{guild_id}"))
+            .label(repeat_label)
+            .style(repeat_style),
+    ]);
+
+    vec![controls, extras]
 }
 
 fn parse_custom_id(custom_id: &str) -> Option<(&str, GuildId)> {
@@ -56,11 +77,12 @@ pub async fn handle_now_playing_interaction(
     let manager = songbird::get(ctx).await.expect("Songbird not registered");
 
     match action {
-        "pause" => handle_pause(ctx, component, &manager, guild_id).await,
+        "pause" => handle_pause(ctx, component, &manager, guild_id, data).await,
         "skip" => handle_skip(ctx, component, &manager, guild_id, data).await,
         "stop" => handle_stop(ctx, component, &manager, guild_id, data).await,
         "seekback" => handle_seek(ctx, component, &manager, guild_id, false).await,
         "seekfwd" => handle_seek(ctx, component, &manager, guild_id, true).await,
+        "repeat" => handle_repeat(ctx, component, &manager, guild_id, data).await,
         _ => {}
     }
 }
@@ -70,6 +92,7 @@ async fn handle_pause(
     component: &ComponentInteraction,
     manager: &Arc<songbird::Songbird>,
     guild_id: GuildId,
+    data: &Data,
 ) {
     let Some(handler_lock) = manager.get(guild_id) else {
         send_ephemeral(ctx, component, "Not currently playing.").await;
@@ -101,8 +124,13 @@ async fn handle_pause(
         }
     };
 
+    let repeating = {
+        let states = data.repeat_states.read().await;
+        states.get(&guild_id).copied().unwrap_or(false)
+    };
+
     // Update the message with toggled button
-    let components = build_now_playing_components(guild_id, now_paused);
+    let components = build_now_playing_components(guild_id, now_paused, repeating);
 
     let response = CreateInteractionResponse::UpdateMessage(
         CreateInteractionResponseMessage::new().components(components),
@@ -125,6 +153,9 @@ async fn handle_skip(
         return;
     };
 
+    // Capture the currently playing track BEFORE skipping
+    let skipped = QueueService::skip(&data.guild_queues, guild_id).await;
+
     {
         let handler = handler_lock.lock().await;
         let queue = handler.queue();
@@ -135,7 +166,6 @@ async fn handle_skip(
         let _ = queue.skip();
     }
 
-    let skipped = QueueService::skip(&data.guild_queues, guild_id).await;
     let msg = match skipped {
         Some(track) => format!("Skipped: **{track}**"),
         None => "Skipped current track.".to_string(),
@@ -158,6 +188,7 @@ async fn handle_stop(
         &data.inactivity_handles,
         &data.now_playing_messages,
         &ctx.http,
+        &data.repeat_states,
     )
     .await;
 
@@ -169,6 +200,58 @@ async fn handle_stop(
     let _ = manager.leave(guild_id).await;
 
     send_ephemeral(ctx, component, "Stopped playback and left the voice channel.").await;
+}
+
+async fn handle_repeat(
+    ctx: &serenity::Context,
+    component: &ComponentInteraction,
+    manager: &Arc<songbird::Songbird>,
+    guild_id: GuildId,
+    data: &Data,
+) {
+    let Some(handler_lock) = manager.get(guild_id) else {
+        send_ephemeral(ctx, component, "Not currently playing.").await;
+        return;
+    };
+
+    // Toggle repeat state
+    let now_repeating = {
+        let mut states = data.repeat_states.write().await;
+        let entry = states.entry(guild_id).or_insert(false);
+        *entry = !*entry;
+        *entry
+    };
+
+    // Enable/disable loop on the current songbird track
+    let handler = handler_lock.lock().await;
+    if let Some(current) = handler.queue().current() {
+        if now_repeating {
+            let _ = current.enable_loop();
+        } else {
+            let _ = current.disable_loop();
+        }
+    }
+
+    // Get current pause state to rebuild components correctly
+    let paused = if let Some(current) = handler.queue().current() {
+        current
+            .get_info()
+            .await
+            .map(|info| !matches!(info.playing, PlayMode::Play))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    let components = build_now_playing_components(guild_id, paused, now_repeating);
+
+    let response = CreateInteractionResponse::UpdateMessage(
+        CreateInteractionResponseMessage::new().components(components),
+    );
+
+    if let Err(e) = component.create_response(&ctx.http, response).await {
+        tracing::warn!("Failed to respond to repeat interaction: {e}");
+    }
 }
 
 async fn handle_seek(

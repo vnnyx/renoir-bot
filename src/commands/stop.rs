@@ -17,6 +17,7 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
         &data.inactivity_handles,
         &data.now_playing_messages,
         &ctx.serenity_context().http,
+        &data.repeat_states,
     )
     .await;
 

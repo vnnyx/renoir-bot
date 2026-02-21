@@ -24,6 +24,7 @@ pub type EnqueueCancels = Arc<RwLock<HashMap<serenity::GuildId, Vec<Arc<AtomicBo
 pub type JoinLocks = Arc<RwLock<HashMap<serenity::GuildId, Arc<Mutex<()>>>>>;
 pub type NowPlayingMessages =
     Arc<RwLock<HashMap<serenity::GuildId, (serenity::ChannelId, serenity::MessageId)>>>;
+pub type RepeatStates = Arc<RwLock<HashMap<serenity::GuildId, bool>>>;
 
 pub struct Data {
     pub music_service: MusicService,
@@ -34,6 +35,7 @@ pub struct Data {
     pub enqueue_cancels: EnqueueCancels,
     pub join_locks: JoinLocks,
     pub now_playing_messages: NowPlayingMessages,
+    pub repeat_states: RepeatStates,
 }
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -92,6 +94,7 @@ async fn main() {
                 let enqueue_cancels = Arc::new(RwLock::new(HashMap::new()));
                 let join_locks = Arc::new(RwLock::new(HashMap::new()));
                 let now_playing_messages = Arc::new(RwLock::new(HashMap::new()));
+                let repeat_states = Arc::new(RwLock::new(HashMap::new()));
                 Ok(Data {
                     music_service,
                     guild_queues,
@@ -101,6 +104,7 @@ async fn main() {
                     enqueue_cancels,
                     join_locks,
                     now_playing_messages,
+                    repeat_states,
                 })
             })
         })

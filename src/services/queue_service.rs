@@ -21,9 +21,23 @@ impl QueueService {
         map.entry(guild_id).or_default().push(track);
     }
 
+    /// Advances the queue: pops the next track into `current` and returns a clone.
+    pub async fn advance(queues: &GuildQueues, guild_id: GuildId) -> Option<Track> {
+        let mut map = queues.write().await;
+        let queue = map.get_mut(&guild_id)?;
+        queue.advance().cloned()
+    }
+
+    /// Returns a clone of the currently playing track (read lock only).
+    pub async fn current(queues: &GuildQueues, guild_id: GuildId) -> Option<Track> {
+        let map = queues.read().await;
+        map.get(&guild_id)?.current().cloned()
+    }
+
+    /// Takes the currently playing track out of the queue (used for skip messages).
     pub async fn skip(queues: &GuildQueues, guild_id: GuildId) -> Option<Track> {
         let mut map = queues.write().await;
-        map.get_mut(&guild_id)?.pop()
+        map.get_mut(&guild_id)?.take_current()
     }
 
     pub async fn clear(queues: &GuildQueues, guild_id: GuildId) {

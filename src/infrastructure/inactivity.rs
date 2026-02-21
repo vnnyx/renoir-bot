@@ -6,7 +6,7 @@ use tokio::sync::Notify;
 
 use crate::services::cleanup::cleanup_guild;
 use crate::services::queue_service::GuildQueues;
-use crate::{EnqueueCancels, InactivityHandles, NowPlayingMessages};
+use crate::{EnqueueCancels, InactivityHandles, NowPlayingMessages, RepeatStates};
 
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const CHECK_INTERVAL: Duration = Duration::from_secs(30);
@@ -26,6 +26,7 @@ pub fn spawn_inactivity_monitor(
     inactivity_handles: InactivityHandles,
     enqueue_cancels: EnqueueCancels,
     now_playing_messages: NowPlayingMessages,
+    repeat_states: RepeatStates,
 ) -> Arc<Notify> {
     let cancel = Arc::new(Notify::new());
     let cancel_clone = cancel.clone();
@@ -63,6 +64,7 @@ pub fn spawn_inactivity_monitor(
                     &inactivity_handles,
                     &now_playing_messages,
                     &http,
+                    &repeat_states,
                 )
                 .await;
 

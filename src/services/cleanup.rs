@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use poise::serenity_prelude::{GuildId, Http};
 
 use crate::services::queue_service::QueueService;
-use crate::{EnqueueCancels, InactivityHandles, NowPlayingMessages};
+use crate::{EnqueueCancels, InactivityHandles, NowPlayingMessages, RepeatStates};
 use crate::services::queue_service::GuildQueues;
 
 /// Cancels background enqueue tasks, clears the queue, stops the inactivity
@@ -16,6 +16,7 @@ pub async fn cleanup_guild(
     inactivity_handles: &InactivityHandles,
     now_playing_messages: &NowPlayingMessages,
     http: &Http,
+    repeat_states: &RepeatStates,
 ) {
     // Cancel all background enqueue tasks
     if let Some(flags) = enqueue_cancels.write().await.remove(&guild_id) {
@@ -36,4 +37,7 @@ pub async fn cleanup_guild(
     if let Some((channel_id, message_id)) = now_playing_messages.write().await.remove(&guild_id) {
         let _ = channel_id.delete_message(http, message_id).await;
     }
+
+    // Clear repeat state
+    repeat_states.write().await.remove(&guild_id);
 }

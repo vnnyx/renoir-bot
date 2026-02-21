@@ -4,6 +4,7 @@ use super::track::Track;
 
 #[derive(Debug, Default)]
 pub struct MusicQueue {
+    current: Option<Track>,
     tracks: VecDeque<Track>,
 }
 
@@ -16,7 +17,24 @@ impl MusicQueue {
         self.tracks.pop_front()
     }
 
+    /// Pops the next track from the queue into `current`, returning a reference to it.
+    pub fn advance(&mut self) -> Option<&Track> {
+        self.current = self.tracks.pop_front();
+        self.current.as_ref()
+    }
+
+    /// Returns a reference to the currently playing track.
+    pub fn current(&self) -> Option<&Track> {
+        self.current.as_ref()
+    }
+
+    /// Takes the current track out (used by skip to return the skipped track).
+    pub fn take_current(&mut self) -> Option<Track> {
+        self.current.take()
+    }
+
     pub fn clear(&mut self) {
+        self.current = None;
         self.tracks.clear();
     }
 
