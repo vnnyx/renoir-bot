@@ -29,6 +29,10 @@ RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
 COPY --from=builder /app/target/release/renoir-bot /usr/local/bin/
 
 RUN useradd -r -s /usr/sbin/nologin bot
+
+COPY www.youtube.com_cookies.txt /home/bot/cookies.txt
+RUN chown bot:bot /home/bot/cookies.txt
+
 USER bot
 
 ENTRYPOINT ["renoir-bot"]
